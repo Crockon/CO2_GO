@@ -9,7 +9,9 @@
 //other pins can be defined by youself,for example
 //pin usage as follow:
 //                   CS  DC/RS  RESET  SDI/MOSI  SCK  SDO/MISO  LED    VCC     GND    
-//ESP32-WROOM-32E:   15    2      27      13     14      12     21      5V     GND  
+//ESP32-WROOM-32E:   25    32      33      23     18      19     -1      5V     GND  
+//                   SCL  SCA    INT      RST
+//TOUCHSCREEN:       26    27      35      14
 
 //Remember to set the pins to suit your display module!
 
@@ -30,6 +32,7 @@
 #include <Vector.h>
 #include <vector>
 #include <Wire.h>
+
 #include "Adafruit_MPRLS.h"
 #include "font.h"
 #include "touch.h"
@@ -38,20 +41,28 @@
 //TFT LCD Screen set up
 TFT_eSPI my_lcd = TFT_eSPI(); 
 
+//__________________________________
+//Set up pressure sensor
+#define RESET_PIN  -1  // set to any GPIO pin # to hard-reset on begin()
+#define EOC_PIN    -1  // set to any GPIO pin to read end-of-conversion by pin
+Adafruit_MPRLS mpr = Adafruit_MPRLS(RESET_PIN, EOC_PIN);
+unsigned long lastPressureRead = 0;
+float p = 0; //pressure
+
 const int customSDA = 27; 
 const int customSCL = 26; 
 
-#define TFT_CS 25
-#define TFT_RST 33
-#define TFT_RS 32
-#define CTP_INT 35
-#define CTP_RST 14
-#define CTP_SDA 27
-#define CTP_SCL 26
-#define SD_CS 5
-#define TFT_SCK 18
-#define TFT_MISO 19
-#define TFT_MOSI 23
+// #define TFT_CS 25
+// #define TFT_RST 33
+// #define TFT_RS 32
+// #define CTP_INT 35
+// #define CTP_RST 14
+// #define CTP_SDA 27
+// #define CTP_SCL 26
+// #define SD_CS 5
+// #define TFT_SCK 18
+// #define TFT_MISO 19
+// #define TFT_MOSI 23
 
 
 #define BLACK   0x0000
@@ -120,6 +131,9 @@ bool alarmAcked = false;   // mute pressed during alarm
 
 unsigned long apneaStartT = 0;   // when CO2 first drops below threshold
 bool apneaTracking = false;
+bool apneaYes = 0;
+
+#define ALARM_PIN 13
 //__________________________________
 
 HardwareSerial SensorSerial(1);
@@ -166,6 +180,43 @@ const char *color_name[] = { "BLUE", "GREEN", "RED", "WHITE" ,"CYAN","MAGENTA","
 //   float corrected = c1 / denom;
 //   return (int)roundf(corrected);
 // }
+
+void drawGUI(int drawBoxes, int redrawMute) {
+  // Static variables to track previous state - only redraw on change
+  static int prev_mute = -1;  // -1 forces draw on first call
+  static int prev_etco2 = -1;
+
+  if (drawBoxes == 1) {
+    my_lcd.setTextColor(0xFFFF);
+    my_lcd.setTextSize(3);
+    my_lcd.setFreeFont();
+    my_lcd.drawRect(10, 160, 460, 151, 0xFFFF);
+    my_lcd.drawRect(10, 22, 170, 120, 0xFFFF);
+    my_lcd.drawRect(200, 22, 121, 67, 0xFFFF);
+    my_lcd.drawRect(339, 22, 131, 66, 0xFFFF);
+    my_lcd.drawString("Edit", 225, 46);
+    my_lcd.drawString("EtCO2:", 17, 25);
+  }
+
+  // update when mute button pressed or etco2 updates
+  if (mute != prev_mute || redrawMute) {
+    if (mute == 0) {
+      my_lcd.fillRect(339, 22, 131, 66, BLACK);
+      my_lcd.drawRect(339, 22, 131, 66, 0xFFFF);
+      my_lcd.setTextColor(0xFFFF);
+      my_lcd.setTextSize(3);
+      my_lcd.setFreeFont();
+      my_lcd.drawString("Mute", 369, 46);
+    } else {
+      my_lcd.fillRect(339, 22, 131, 66, 0xFFFF);
+      my_lcd.setTextColor(BLACK);
+      my_lcd.setTextSize(3);
+      my_lcd.setFreeFont();
+      my_lcd.drawString("Unmute", 355, 46);
+    }
+    prev_mute = mute;
+  }
+}
 
 void processLine(String line) {
   line.trim();
@@ -286,23 +337,52 @@ void apneaAlarm() {
     return;
   }
 
-  if (millis() - alarmFlashT >= 200) { //flash "Apnea Detected" on screen
-    alarmFlashT  = millis();
-    alarmVisible = !alarmVisible;
+  if(apneaYes) {
 
-    if (alarmVisible) {
-      if (!alarmAcked && mute == 0) { //pulse the alarm buzzer as the screen flashes
-        digitalWrite(18, HIGH);
+    if (millis() - alarmFlashT >= 200) { //flash "Apnea Detected" on screen
+      alarmFlashT  = millis();
+      alarmVisible = !alarmVisible;
+
+      if (alarmVisible) {
+        if (!alarmAcked && mute == 0) { //pulse the alarm buzzer as the screen flashes
+          digitalWrite(ALARM_PIN, HIGH);
+        }
+        my_lcd.fillRect(90, 85, 300, 150, RED);
+        my_lcd.setTextColor(YELLOW);
+        my_lcd.setTextSize(4);
+        my_lcd.drawString("APNEA",    185, 125);
+        my_lcd.drawString("DETECTED", 150, 175);
+        
+        
+      } else {
+        digitalWrite(ALARM_PIN, LOW);
+        my_lcd.fillRect(90, 85, 300, 150, BLACK);
+        drawGUI(1, 1);
       }
-      my_lcd.fillRect(90, 85, 300, 150, RED);
-      my_lcd.setTextColor(YELLOW);
-      my_lcd.setTextSize(4);
-      my_lcd.drawString("APNEA",    185, 125);
-      my_lcd.drawString("DETECTED", 150, 175);
-    } else {
-      digitalWrite(18, LOW);
-      my_lcd.fillRect(90, 85, 300, 150, BLACK);
-      drawGUI(1, 1);
+    }
+  } else 
+    {
+      if (millis() - alarmFlashT >= 500) { //flash "Apnea Detected" on screen
+      alarmFlashT  = millis();
+      alarmVisible = !alarmVisible;
+
+      if (alarmVisible) {
+        if (!alarmAcked && mute == 0) { //pulse the alarm buzzer as the screen flashes
+          digitalWrite(ALARM_PIN, HIGH);
+        }
+        my_lcd.fillRect(90, 85, 300, 150, RED);
+        my_lcd.setTextColor(YELLOW);
+        my_lcd.setTextSize(4);
+        my_lcd.drawString("LOW", 200, 125);
+        my_lcd.drawString("CO2", 200, 175);
+        
+        
+      } else {
+        digitalWrite(ALARM_PIN, LOW);
+        my_lcd.fillRect(90, 85, 300, 150, BLACK);
+        drawGUI(1, 1);
+      }
+    
     }
   }
 }
@@ -320,9 +400,15 @@ void alarmCount(float co2mmhg) {
       alarmFlashT = millis();
       alarmAcked = false;
     }
+    if(millis() - apneaStartT >= 20000UL) {
+      apneaYes = 1;
+    }
+    else {
+      apneaYes = 0;
+    }
   } else { //reset if CO2 detected above threshold
     if (alarmState == ALARM_APNEA) {
-      digitalWrite(18, LOW);                        // make sure buzzer is off
+      digitalWrite(ALARM_PIN, LOW);                        // make sure buzzer is off
       my_lcd.fillRect(90, 85, 300, 150, BLACK);     // erase the red box
       drawGUI(1, 1);                                // redraw boxes/labels over it
     }
@@ -334,18 +420,23 @@ void alarmCount(float co2mmhg) {
   }
 }
 
-// float pressureComp(float co2uncomp) {
-//   // pressureMbar = mpr.readPressure();
-//   // float co2comp = 0;
-//   // if (co2uncomp < 1500) {
-//   //   //Y = 
-//   //   //co2comp = co2uncomp/(1+)
-//   // }
-//   // else {
-//   //   //co2comp = 
-//   // }
-//   return co2uncomp;
-// }
+float pressureComp(float co2uncomp) {
+  pressureMbar = mpr.readPressure();
+  float Y = 0;
+  float co2comp = 0;
+  if (co2uncomp < 1500) {
+    Y = ((2.6661 * pow(10, -16)) * pow(co2uncomp,4))-((1.1146 * pow(10, -12)) * pow(co2uncomp, 3))-((1.7397 * pow(10, -9)) * pow(co2uncomp, 2))-((1.2556 * pow(10, -6)) * co2uncomp)-(9.8754 * pow(10, -4));
+    co2comp = co2uncomp/(1+(Y*(1013-pressureMbar)));
+  }
+  else {
+    Y = ((2.811 * pow(10, -38)) * pow(co2uncomp, 6))-((9.817 * pow(10, -32)) * pow(co2uncomp, 5))-((1.304 * pow(10, -25)) * pow(co2uncomp, 4))-((8.126 * pow(10, -20)) * pow(co2uncomp, 3))-(2.311 * pow(10, -14) * pow(co2uncomp, 2))-(2.195 * pow(10, -9) * co2uncomp)-(1.471 * pow(10, -3));
+    co2comp = co2uncomp/(1+(Y*(1013-pressureMbar)));
+  }
+  Serial.println(co2uncomp);
+  Serial.println(co2comp);
+
+  return co2comp;
+}
 
 // Push a new sample, redraw only the changed columns (fast, no full clear)
 void updateGraph(int co2val) {
@@ -397,42 +488,7 @@ void updateGraph(int co2val) {
   
 }
 
-void drawGUI(int drawBoxes, int redrawMute) {
-  // Static variables to track previous state - only redraw on change
-  static int prev_mute = -1;  // -1 forces draw on first call
-  static int prev_etco2 = -1;
 
-  if (drawBoxes == 1) {
-    my_lcd.setTextColor(0xFFFF);
-    my_lcd.setTextSize(3);
-    my_lcd.setFreeFont();
-    my_lcd.drawRect(10, 160, 460, 151, 0xFFFF);
-    my_lcd.drawRect(10, 22, 170, 120, 0xFFFF);
-    my_lcd.drawRect(200, 22, 121, 67, 0xFFFF);
-    my_lcd.drawRect(339, 22, 131, 66, 0xFFFF);
-    my_lcd.drawString("Edit", 225, 46);
-    my_lcd.drawString("EtCO2:", 17, 25);
-  }
-
-  // update when mute button pressed or etco2 updates
-  if (mute != prev_mute || redrawMute) {
-    if (mute == 0) {
-      my_lcd.fillRect(339, 22, 131, 66, BLACK);
-      my_lcd.drawRect(339, 22, 131, 66, 0xFFFF);
-      my_lcd.setTextColor(0xFFFF);
-      my_lcd.setTextSize(3);
-      my_lcd.setFreeFont();
-      my_lcd.drawString("Mute", 369, 46);
-    } else {
-      my_lcd.fillRect(339, 22, 131, 66, 0xFFFF);
-      my_lcd.setTextColor(BLACK);
-      my_lcd.setTextSize(3);
-      my_lcd.setFreeFont();
-      my_lcd.drawString("Unmute", 355, 46);
-    }
-    prev_mute = mute;
-  }
-}
 
 void setup()
 {
@@ -440,8 +496,8 @@ void setup()
   // Initialize sensor serial — adjust baud rate to match your sensor's spec
   SensorSerial.begin(9600, SERIAL_8N1, SENSOR_RX_PIN, SENSOR_TX_PIN);
 
-  pinMode(18, OUTPUT);
-  digitalWrite(18, LOW);
+  pinMode(ALARM_PIN, OUTPUT);
+  digitalWrite(ALARM_PIN, LOW);
 
   my_lcd.init();
   my_lcd.fillScreen(BLACK);
@@ -463,6 +519,7 @@ void setup()
   scrollBuf = new int[graphWidth]();
 
   Wire.begin(customSDA, customSCL);
+  mpr.begin();
 
   //check connection with pressure sensor
   // if (! mpr.begin()) {
@@ -476,6 +533,14 @@ void setup()
 void loop() 
 {
   readSensor();
+  // Only read pressure every 5 seconds
+  // if (millis() - lastPressureRead >= 5000UL) {
+  //   p = mpr.readPressure();
+  //   if (p > 0) pressureMbar = p;   // only update if valid
+  //   lastPressureRead = millis();
+  // }
+  // Serial.print("Pressure (mbar): "); Serial.println(pressure_mbar);
+  // Serial.print("Pressure (PSI): "); Serial.println(pressure_mbar / 68.947572932);
   //text_test(filteredCO2);
   //int correctedCO2 = compensateCO2(filteredCO2, pressureMbar);
   updateGraph(filteredCO2);
