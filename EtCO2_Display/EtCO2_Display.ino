@@ -144,6 +144,7 @@ unsigned long lastQuery = 0;
 
 int filteredCO2 = 0;   // stores the latest filtered CO2 reading in ppm
 int rawCO2 = 0;        // stores the latest raw CO2 reading in ppm
+float FiCO2 = 5;       //NEED TO UPDATE WITH FICO2 CALCULATION :)
 
 const char *aspect_name[] = {"PORTRAIT", "LANDSCAPE", "PORTRAIT_REV", "LANDSCAPE_REV"};
 const char *color_name[] = { "BLUE", "GREEN", "RED", "WHITE" ,"CYAN","MAGENTA","YELLOW"};
@@ -477,13 +478,13 @@ void updateGraph(int co2val) {
     my_lcd.drawString(text, 16, 165);
   }
 
-  if(co2mmhg > 2) {
-    check_Et(co2mmhg);
+  check_Et(co2mmhg);
+
+  if(co2mmhg <  FiCO2) {     //NEED TO IMPLEMENT FICO2 CALCULATION INSTEAD OF 5
+    waveVals.clear();
 
   }
-  else{
-    waveVals.clear();
-  }
+
     alarmCount(co2mmhg);
   
 }
