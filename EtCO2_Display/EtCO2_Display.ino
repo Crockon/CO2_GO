@@ -66,6 +66,11 @@ TODO:
 #include "font.h"
 #include "touch.h"
 
+//_________________________________
+//Ste up all the I2C busses
+//TwoWire I2C_1 = TwoWire(0);  //pressure & display
+TwoWire I2C_2 = TwoWire(1);  //battery monitor
+
 //__________________________________
 //TFT LCD Screen set up
 TFT_eSPI my_lcd = TFT_eSPI(); 
@@ -117,6 +122,24 @@ const int customSCL = 26;
 #define LABEL_HEIGHT  36     // pixels reserved for the text labe
 
 #define PPM_TO_MMHG  0.000750062f 
+
+//__________________________________
+//Set up the battery SOC monitor BOOMBA
+// MAX17048/49 fixed I2C address (not configurable)
+#define MAX17049_ADDR     0x36
+
+// Register addresses (from datasheet Table 1)
+#define REG_VCELL         0x02   // Cell voltage
+#define REG_SOC           0x04   // State of Charge
+#define REG_MODE          0x06   // Mode (quick start, hibernate)
+#define REG_VERSION       0x08   // IC version
+#define REG_CONFIG        0x0C   // Configuration
+#define REG_CRATE         0x16   // Charge/discharge rate
+#define REG_COMMAND       0xFE   // Command register
+
+float soc        = 0;
+float voltage    = 0;
+float chargeRate = 0;
 
 //__________________________________
 //Set up pressure sensor
@@ -211,6 +234,51 @@ const char *color_name[] = { "BLUE", "GREEN", "RED", "WHITE" ,"CYAN","MAGENTA","
 //   return (int)roundf(corrected);
 // }
 
+//For Battery monitor
+// Read a 16-bit register (MSB first, as per datasheet)
+uint16_t readRegister(uint8_t reg) {
+  I2C_2.beginTransmission(MAX17049_ADDR);
+  I2C_2.write(reg);
+  if (I2C_2.endTransmission(false) != 0) return 0xFFFF; // NACK — device not found
+  I2C_2.requestFrom(MAX17049_ADDR, 2);
+  if (I2C_2.available() < 2) return 0xFFFF;
+  uint16_t value = (I2C_2.read() << 8) | I2C_2.read();
+  return value;
+}
+
+//For Battery monitor
+// Write a 16-bit register
+bool writeRegister(uint8_t reg, uint16_t value) {
+  I2C_2.beginTransmission(MAX17049_ADDR);
+  I2C_2.write(reg);
+  I2C_2.write((value >> 8) & 0xFF); // MSB
+  I2C_2.write(value & 0xFF);        // LSB
+  return I2C_2.endTransmission() == 0;
+}
+
+// VCELL: per datasheet Table 2, multiply the full 16-bit word by 78.125µV.
+// No bit shift — the entire 16-bit register value is used directly.
+float readVoltage() {
+  uint16_t raw = readRegister(REG_VCELL);
+  if (raw == 0xFFFF) return -1.0;
+  return raw * 0.000078125 * 2; // 78.125µV per LSB, ×2 for MAX17049 2S pack
+}
+
+// SOC: MSB = whole percent, LSB = 1/256 percent (fixed-point)
+float readSOC() {
+  uint16_t raw = readRegister(REG_SOC);
+  if (raw == 0xFFFF) return -1.0;
+  return (raw >> 8) + ((raw & 0xFF) / 256.0);
+}
+
+// CRATE: signed 16-bit, LSB = 0.208%/hr. Negative = discharging, positive = charging.
+float readChargeRate() {
+  uint16_t raw = readRegister(REG_CRATE);
+  if (raw == 0xFFFF) return 0.0;
+  int16_t signed_raw = (int16_t)raw;
+  return signed_raw * 0.208; // %/hour
+}
+
 void drawGUI(int drawBoxes, int redrawMute) {
   // Static variables to track previous state - only redraw on change
   static int prev_mute = -1;  // -1 forces draw on first call
@@ -221,10 +289,12 @@ void drawGUI(int drawBoxes, int redrawMute) {
     my_lcd.setTextSize(3);
     my_lcd.setFreeFont();
     my_lcd.drawRect(10, 160, 460, 151, 0xFFFF);
-    my_lcd.drawRect(10, 22, 170, 120, 0xFFFF);
+    my_lcd.drawRect(10, 22, 170, 135, 0xFFFF);
     my_lcd.drawRect(200, 22, 121, 67, 0xFFFF);
+    my_lcd.drawRect(200, 90, 121, 67, 0xFFFF);
     my_lcd.drawRect(339, 22, 131, 66, 0xFFFF);
-    my_lcd.drawString("Edit", 225, 46);
+    my_lcd.drawString("High", 225, 46);
+    my_lcd.drawString("Low", 235, 46+68);
     my_lcd.drawString("EtCO2:", 17, 25);
   }
 
@@ -246,6 +316,36 @@ void drawGUI(int drawBoxes, int redrawMute) {
     }
     prev_mute = mute;
   }
+
+  //draw battery SOC
+
+  uint16_t COLOR;
+  if(soc > 50) {
+    COLOR = GREEN;
+  }
+  else if (soc > 20 && soc <= 50) {
+    COLOR = YELLOW;
+  }
+  else {
+    COLOR = RED;
+  }
+
+  
+  my_lcd.fillRect(350, 2, 50, 18, BLACK);
+  my_lcd.fillRect(410, 2, 50*soc/100, 18, COLOR);
+  my_lcd.setTextSize(2);
+  char SOCText[30];
+  sprintf(SOCText, "%.0f%%", soc);
+  if (soc == 100) {
+    my_lcd.drawString(SOCText, 360, 4);
+  }
+  else {
+    my_lcd.drawString(SOCText, 370, 4);
+  }
+  
+  my_lcd.drawRect(410, 2, 50, 18, WHITE);
+  my_lcd.drawRect(460, 6, 5, 10, WHITE);
+  
 }
 
 void processLine(String line) {
@@ -293,6 +393,11 @@ void readSensor() {
       lineBuffer += c;
     }
   }
+
+  //read battery monitor
+  soc        = readSOC();
+  voltage    = readVoltage();
+  chargeRate = readChargeRate();
   
 }
 
@@ -548,8 +653,22 @@ void setup()
   // Allocate and zero the scrolling buffer
   scrollBuf = new int[graphWidth]();
 
+  //I2C_1.begin(customSDA, customSCL);
   Wire.begin(customSDA, customSCL);
   mpr.begin();
+  I2C_2.begin(21, 22); // SDA = pin 21, SCL = pin 22
+  
+
+  //initialize battery display
+  uint16_t version = readRegister(REG_VERSION);
+  if (version == 0xFFFF) {
+    Serial.println("ERROR: MAX17049 not found on I2C bus!");
+    Serial.println("Check wiring and pull-up resistors on SDA/SCL.");
+    while (1) delay(1000); // halt
+  }
+  Serial.print("MAX17049 detected. IC version: 0x");
+  Serial.println(version, HEX);
+  Serial.println();
 
   //check connection with pressure sensor
   // if (! mpr.begin()) {
@@ -563,6 +682,13 @@ void setup()
 void loop() 
 {
   readSensor();
+  //for battery monitor
+
+  //fail safe for if connection is bad
+  if (soc < 0 || voltage < 0) {
+    Serial.println("Read error — check I2C connection.");
+  } 
+
   // Only read pressure every 5 seconds
   // if (millis() - lastPressureRead >= 5000UL) {
   //   p = mpr.readPressure();
