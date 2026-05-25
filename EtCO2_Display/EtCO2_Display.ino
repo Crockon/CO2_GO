@@ -160,6 +160,8 @@ int  scrollHead = 0;         // index of the oldest (leftmost) sample
 std::vector<float> waveVals;
 //float past_co2val = 0;
 bool mute = 0;
+bool edit = 0;
+bool mode = 0;
 
 float EtCO2 = 0;
 unsigned long counts_sec = 0;
@@ -170,7 +172,7 @@ float pressureMbar = 800.0;   // fallback: standard sea-level pressure, changes 
 
 
 //For pressing Mute and Edit buttons
-unsigned long lastMutePress = 0;
+unsigned long lastPress = 0;
 const unsigned long DEBOUNCE_MS = 300;
 
 //__________________________________
@@ -279,7 +281,7 @@ float readChargeRate() {
   return signed_raw * 0.208; // %/hour
 }
 
-void drawGUI(int drawBoxes, int redrawMute) {
+void drawGUI(int drawBoxes, int redrawMute, bool editing, bool editmode) {
   // Static variables to track previous state - only redraw on change
   static int prev_mute = -1;  // -1 forces draw on first call
   static int prev_etco2 = -1;
@@ -290,11 +292,11 @@ void drawGUI(int drawBoxes, int redrawMute) {
     my_lcd.setFreeFont();
     my_lcd.drawRect(10, 160, 460, 151, 0xFFFF);
     my_lcd.drawRect(10, 22, 170, 135, 0xFFFF);
-    my_lcd.drawRect(200, 22, 121, 67, 0xFFFF);
-    my_lcd.drawRect(200, 90, 121, 67, 0xFFFF);
+    //my_lcd.drawRect(200, 22, 121, 67, 0xFFFF);
+    //my_lcd.drawRect(200, 90, 121, 67, 0xFFFF);
     my_lcd.drawRect(339, 22, 131, 66, 0xFFFF);
-    my_lcd.drawString("High", 225, 46);
-    my_lcd.drawString("Low", 235, 46+68);
+    //my_lcd.drawString("High", 225, 46);
+    //my_lcd.drawString("Low", 235, 46+68);
     my_lcd.drawString("EtCO2:", 17, 25);
   }
 
@@ -315,6 +317,52 @@ void drawGUI(int drawBoxes, int redrawMute) {
       my_lcd.drawString("Unmute", 355, 46);
     }
     prev_mute = mute;
+  }
+  if(edit == 0) {
+    my_lcd.fillRect(410, 170, 50, 50, BLACK);
+    my_lcd.fillRect(410, 230, 50, 50, BLACK);
+    my_lcd.fillRect(200, 22, 121, 67, BLACK);
+    my_lcd.fillRect(200, 90, 121, 67, BLACK);
+    my_lcd.drawRect(200, 22, 121, 67, 0xFFFF);
+    my_lcd.drawRect(200, 90, 121, 67, 0xFFFF);
+    my_lcd.setTextColor(0xFFFF);
+    my_lcd.setTextSize(3);
+    my_lcd.setFreeFont();
+    my_lcd.drawString("High", 225, 46);
+    my_lcd.drawString("Low", 235, 46+68);
+  } else {
+    my_lcd.fillRect(410, 170, 50, 50, BLACK);
+    my_lcd.drawRect(410, 170, 50, 50, WHITE); //plus box
+    my_lcd.fillRect(410, 230, 50, 50, BLACK);
+    my_lcd.drawRect(410, 230, 50, 50, WHITE); //minus box
+    my_lcd.fillRect(420, 251, 30, 8, WHITE); //draw minus sign
+    my_lcd.fillRect(420, 191, 30, 8, WHITE);
+    my_lcd.fillRect(431, 180, 8, 30, WHITE); //draw plus sign
+
+
+    my_lcd.setTextColor(BLACK);
+    my_lcd.setTextSize(3);
+    my_lcd.setFreeFont();
+      if(mode) {
+        my_lcd.fillRect(200, 22, 121, 67, WHITE);
+        my_lcd.drawRect(200, 22, 121, 67, 0xFFFF);
+        my_lcd.drawString("High", 225, 46);
+
+        my_lcd.fillRect(200, 90, 121, 67, BLACK);
+        my_lcd.drawRect(200, 90, 121, 67, 0xFFFF);
+        my_lcd.setTextColor(0xFFFF);
+        my_lcd.drawString("Low", 235, 46+68);
+      } else {
+        my_lcd.fillRect(200, 90, 121, 67, WHITE);
+        my_lcd.drawRect(200, 90, 121, 67, 0xFFFF);
+        my_lcd.drawString("Low", 235, 46+68);
+
+        my_lcd.fillRect(200, 22, 121, 67, BLACK);
+        my_lcd.drawRect(200, 22, 121, 67, 0xFFFF);
+        my_lcd.setTextColor(0xFFFF);
+        my_lcd.drawString("High", 225, 46);
+      }
+
   }
 
   //draw battery SOC
@@ -492,7 +540,7 @@ void apneaAlarm() {
       } else {
         digitalWrite(ALARM_PIN, LOW);
         my_lcd.fillRect(90, 85, 300, 150, BLACK);
-        drawGUI(1, 1);
+        drawGUI(1, 1, edit, mode);
       }
     }
   } else 
@@ -515,7 +563,7 @@ void apneaAlarm() {
       } else {
         digitalWrite(ALARM_PIN, LOW);
         my_lcd.fillRect(90, 85, 300, 150, BLACK);
-        drawGUI(1, 1);
+        drawGUI(1, 1, edit, mode);
       }
     
     }
@@ -545,7 +593,7 @@ void alarmCount(float co2mmhg) {
     if (alarmState == ALARM_APNEA) {
       digitalWrite(ALARM_PIN, LOW);                        // make sure buzzer is off
       my_lcd.fillRect(90, 85, 300, 150, BLACK);     // erase the red box
-      drawGUI(1, 1);                                // redraw boxes/labels over it
+      drawGUI(1, 1, edit, mode);                                // redraw boxes/labels over it
     }
     apneaTracking = false;
     apneaStartT = 0;
@@ -641,7 +689,7 @@ void setup()
   touch_init(my_lcd.width(), my_lcd.height(),my_lcd.getRotation());
 
   //initially draw GUI
-  drawGUI(1, 0);
+  drawGUI(1, 0, edit, mode);
   
   //my_lcd.drawString("CO2", 16, 105);
   // [END lopaka generated]
@@ -703,16 +751,56 @@ void loop()
   if(touch_touched()) {
     if (touch_last_x >= 339 && touch_last_x <= 470 && touch_last_y >= 22 && touch_last_y <= 88) {
       unsigned long now = millis();
-      if (now - lastMutePress >= DEBOUNCE_MS) { //debounce check
+      if (now - lastPress >= DEBOUNCE_MS) { //debounce check
         mute = !mute;
-        lastMutePress = now;
+        lastPress = now;
       }
 
       touch_last_x = 0;
       touch_last_y = 0;
     }
+    else if (touch_last_x >= 200 && touch_last_x <= 321 && touch_last_y >= 22 && touch_last_y <= 88) {
+      unsigned long now = millis();
+      if (now - lastPress >= DEBOUNCE_MS) { //debounce check
+        if(edit && mode) {
+          edit = !edit;
+          lastPress = now;
+        } else if (edit && !mode) {
+          mode = !mode;
+          lastPress = now;
+        } else if (!edit) {
+          edit = !edit;
+          mode = 1;
+          lastPress = now;
+        } 
+      }
+
+
+      touch_last_x = 0;
+      touch_last_y = 0;
+    }
+    else if (touch_last_x >= 200 && touch_last_x <= 321 && touch_last_y >= 90 && touch_last_y <= 157) {
+      unsigned long now = millis();
+      if (now - lastPress >= DEBOUNCE_MS) { //debounce check
+        if(edit && !mode) {
+          edit = !edit;
+          lastPress = now;
+        } else if (edit && mode) {
+          mode = !mode;
+          lastPress = now;
+        } else if (!edit) {
+          edit = !edit;
+          mode = 0;
+          lastPress = now;
+        } 
+      }
+
+
+      touch_last_x = 0;
+      touch_last_y = 0;
+    }
   }
-  drawGUI(0, 0);
+  drawGUI(0, 0, edit, mode);
   apneaAlarm();
   delay(50);
   //my_lcd.fillScreen(BLACK);
