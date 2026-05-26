@@ -138,6 +138,7 @@ const int customSCL = 26;
 #define REG_COMMAND       0xFE   // Command register
 
 float soc        = 0;
+float soc_past = 0;
 float voltage    = 0;
 float chargeRate = 0;
 
@@ -161,7 +162,10 @@ std::vector<float> waveVals;
 //float past_co2val = 0;
 bool mute = 0;
 bool edit = 0;
+bool edit_past = 0;
 bool mode = 0;
+bool status = 0;
+bool prev_status = 0;
 
 float EtCO2 = 0;
 unsigned long counts_sec = 0;
@@ -188,6 +192,11 @@ bool apneaTracking = false;
 bool apneaYes = 0;
 
 #define ALARM_PIN 13
+
+int high = 45;
+int low = 30;
+int prev_high_y = -1;  // screen Y of last drawn high line
+int prev_low_y  = -1;  // screen Y of last drawn low line
 //__________________________________
 
 HardwareSerial SensorSerial(1);
@@ -282,6 +291,8 @@ float readChargeRate() {
 }
 
 void drawGUI(int drawBoxes, int redrawMute, bool editing, bool editmode) {
+  //if (alarmVisible) return;
+
   // Static variables to track previous state - only redraw on change
   static int prev_mute = -1;  // -1 forces draw on first call
   static int prev_etco2 = -1;
@@ -301,7 +312,31 @@ void drawGUI(int drawBoxes, int redrawMute, bool editing, bool editmode) {
   }
 
   // update when mute button pressed or etco2 updates
+  if(status != prev_status || redrawMute) {
+    EtCO2 = 0;
+    updateEtCO2(EtCO2);
+    my_lcd.fillRect(13, 132, 165, 20, BLACK);
+    
+
+    if(status) {
+      my_lcd.fillRect(339, 22+68, 131, 66, WHITE);
+      my_lcd.drawRect(339, 22+68, 131, 66, 0xFFFF);
+      my_lcd.setTextColor(BLACK);
+      my_lcd.setTextSize(3);
+      my_lcd.setFreeFont();
+      my_lcd.drawString("Stop", 370, 46+68);
+    } else{
+      my_lcd.fillRect(339, 22+68, 131, 66, BLACK);
+      my_lcd.drawRect(339, 22+68, 131, 66, 0xFFFF);
+      my_lcd.setTextColor(0xFFFF);
+      my_lcd.setTextSize(3);
+      my_lcd.setFreeFont();
+      my_lcd.drawString("Start", 363, 46+68);
+    }
+    prev_status = status;
+  }
   if (mute != prev_mute || redrawMute) {
+
     if (mute == 0) {
       my_lcd.fillRect(339, 22, 131, 66, BLACK);
       my_lcd.drawRect(339, 22, 131, 66, 0xFFFF);
@@ -319,17 +354,19 @@ void drawGUI(int drawBoxes, int redrawMute, bool editing, bool editmode) {
     prev_mute = mute;
   }
   if(edit == 0) {
-    my_lcd.fillRect(410, 170, 50, 50, BLACK);
-    my_lcd.fillRect(410, 230, 50, 50, BLACK);
-    my_lcd.fillRect(200, 22, 121, 67, BLACK);
-    my_lcd.fillRect(200, 90, 121, 67, BLACK);
-    my_lcd.drawRect(200, 22, 121, 67, 0xFFFF);
-    my_lcd.drawRect(200, 90, 121, 67, 0xFFFF);
-    my_lcd.setTextColor(0xFFFF);
-    my_lcd.setTextSize(3);
-    my_lcd.setFreeFont();
-    my_lcd.drawString("High", 225, 46);
-    my_lcd.drawString("Low", 235, 46+68);
+    if(edit != edit_past || redrawMute) {
+      my_lcd.fillRect(410, 170, 50, 50, BLACK);
+      my_lcd.fillRect(410, 230, 50, 50, BLACK);
+      my_lcd.fillRect(200, 22, 121, 67, BLACK);
+      my_lcd.fillRect(200, 90, 121, 67, BLACK);
+      my_lcd.drawRect(200, 22, 121, 67, 0xFFFF);
+      my_lcd.drawRect(200, 90, 121, 67, 0xFFFF);
+      my_lcd.setTextColor(0xFFFF);
+      my_lcd.setTextSize(3);
+      my_lcd.setFreeFont();
+      my_lcd.drawString("High", 225, 46);
+      my_lcd.drawString("Low", 235, 46+68);
+    }
   } else {
     my_lcd.fillRect(410, 170, 50, 50, BLACK);
     my_lcd.drawRect(410, 170, 50, 50, WHITE); //plus box
@@ -364,7 +401,7 @@ void drawGUI(int drawBoxes, int redrawMute, bool editing, bool editmode) {
       }
 
   }
-
+  edit_past = edit;
   //draw battery SOC
 
   uint16_t COLOR;
@@ -376,6 +413,10 @@ void drawGUI(int drawBoxes, int redrawMute, bool editing, bool editmode) {
   }
   else {
     COLOR = RED;
+  }
+
+  if (soc != soc_past) {
+    my_lcd.fillRect(410, 2, 50, 18, BLACK);
   }
 
   
@@ -393,6 +434,8 @@ void drawGUI(int drawBoxes, int redrawMute, bool editing, bool editmode) {
   
   my_lcd.drawRect(410, 2, 50, 18, WHITE);
   my_lcd.drawRect(460, 6, 5, 10, WHITE);
+
+  soc_past = soc;
   
 }
 
@@ -541,6 +584,7 @@ void apneaAlarm() {
         digitalWrite(ALARM_PIN, LOW);
         my_lcd.fillRect(90, 85, 300, 150, BLACK);
         drawGUI(1, 1, edit, mode);
+        updateEtCO2(EtCO2);
       }
     }
   } else 
@@ -564,6 +608,7 @@ void apneaAlarm() {
         digitalWrite(ALARM_PIN, LOW);
         my_lcd.fillRect(90, 85, 300, 150, BLACK);
         drawGUI(1, 1, edit, mode);
+        updateEtCO2(EtCO2);
       }
     
     }
@@ -601,6 +646,20 @@ void alarmCount(float co2mmhg) {
     alarmVisible  = false;
     alarmAcked = false;
   }
+
+  if(!status) {
+    if (alarmState == ALARM_APNEA) {
+      digitalWrite(ALARM_PIN, LOW);                        // make sure buzzer is off
+      my_lcd.fillRect(90, 85, 300, 150, BLACK);     // erase the red box
+      drawGUI(1, 1, edit, mode);                                // redraw boxes/labels over it
+    }
+    apneaTracking = false;
+    apneaStartT = 0;
+    alarmState = ALARM_OFF;
+    alarmVisible  = false;
+    alarmAcked = false;
+    apneaYes = 0;
+  }
 }
 
 float pressureComp(float co2uncomp) {
@@ -619,6 +678,45 @@ float pressureComp(float co2uncomp) {
   Serial.println(co2comp);
 
   return co2comp;
+}
+
+void drawLimitLines() {
+  
+  // Convert mmHg value to graph Y pixel position
+  auto mmhgToY = [](float mmhg) -> int {
+    float clamped = constrain(mmhg, CO2_MIN, CO2_MAX);
+    int barH = map(clamped, CO2_MIN, CO2_MAX, 10, 125);
+    return GRAPH_Y + (graphHeight - barH);
+  };
+
+  int high_y = mmhgToY((float)high);
+  int low_y  = mmhgToY((float)low);
+
+  // Erase old lines only if position changed
+  if (prev_high_y != high_y) {
+    my_lcd.drawFastHLine(GRAPH_X, prev_high_y, graphWidth, BLACK);
+    prev_high_y = high_y;
+  }
+  if (prev_low_y != low_y) {
+    my_lcd.drawFastHLine(GRAPH_X, prev_low_y, graphWidth, BLACK);
+    prev_low_y = low_y;
+  }
+
+  // Draw dotted lines (every other 4px segment)
+  if(!alarmVisible) {
+    for (int x = GRAPH_X; x < GRAPH_X + graphWidth; x += 8) {
+      if(edit && mode) {
+        my_lcd.drawFastHLine(x, high_y, 4, RED);
+      } else{
+        my_lcd.drawFastHLine(x, high_y, 4, WHITE);
+      }
+      if(edit && !mode) {
+        my_lcd.drawFastHLine(x, low_y,  4, RED);
+      } else{
+        my_lcd.drawFastHLine(x, low_y,  4, WHITE);
+      }
+    }
+  }
 }
 
 // Push a new sample, redraw only the changed columns (fast, no full clear)
@@ -652,12 +750,48 @@ void updateGraph(int co2val) {
 
   // --- 3. Redraw text label (only this strip is erased, not the graph) ---
   if (!alarmVisible) {
-    my_lcd.fillRect(16, 165, 200, 20, BLACK);
-    my_lcd.setTextColor(WHITE);
+    my_lcd.fillRect(16, 165, 200, 50, BLACK);
     char text[30];
+    char hightext[30];
+    char lowtext[30];
     my_lcd.setTextSize(2);
     sprintf(text, "CO2: %.0f mmHg", co2mmhg);
-    my_lcd.drawString(text, 16, 165);
+    sprintf(hightext, "H: %d mmHg", high);
+    sprintf(lowtext, "L: %d mmHg", low);
+    //my_lcd.drawString(text, 16, 165);
+    if(edit && mode) {
+      my_lcd.setTextColor(RED);
+    } else{
+      my_lcd.setTextColor(WHITE);
+    }
+    my_lcd.drawString(hightext, 16, 165);
+
+    if(edit && !mode) {
+      my_lcd.setTextColor(RED);
+    } else {
+      my_lcd.setTextColor(WHITE);
+    }
+    my_lcd.drawString(lowtext, 156, 165);
+
+    if(EtCO2 < low) {
+      my_lcd.setTextColor(YELLOW);
+      if(status){
+        my_lcd.fillRect(13, 132, 165, 20, RED);
+        my_lcd.drawString("LOW CO2 LEVEL", 16, 135);
+      }
+    } else if(EtCO2 > high) {
+      my_lcd.setTextColor(YELLOW);
+      if(status) {
+        my_lcd.fillRect(13, 132, 165, 20, RED);
+        my_lcd.drawString("HIGH CO2 LVL", 16, 135);
+      }
+    } else {
+      my_lcd.fillRect(13, 132, 165, 20, BLACK);
+
+    }
+    my_lcd.setTextColor(WHITE);
+
+
   }
 
   check_Et(co2mmhg);
@@ -667,10 +801,12 @@ void updateGraph(int co2val) {
 
   }
 
-    alarmCount(co2mmhg);
-  
-}
 
+  alarmCount(co2mmhg);
+
+  
+  drawLimitLines();
+}
 
 
 void setup()
@@ -689,7 +825,7 @@ void setup()
   touch_init(my_lcd.width(), my_lcd.height(),my_lcd.getRotation());
 
   //initially draw GUI
-  drawGUI(1, 0, edit, mode);
+  drawGUI(1, 1, edit, mode);
   
   //my_lcd.drawString("CO2", 16, 105);
   // [END lopaka generated]
@@ -725,6 +861,7 @@ void setup()
   //     delay(10);
   //   }
   // }
+  updateEtCO2(EtCO2);
 }
 
 void loop() 
@@ -736,6 +873,7 @@ void loop()
   if (soc < 0 || voltage < 0) {
     Serial.println("Read error — check I2C connection.");
   } 
+
 
   // Only read pressure every 5 seconds
   // if (millis() - lastPressureRead >= 5000UL) {
@@ -798,10 +936,61 @@ void loop()
 
       touch_last_x = 0;
       touch_last_y = 0;
+    } else if (touch_last_x >= 339 && touch_last_x <= 470 && touch_last_y >= 90 && touch_last_y <= 157) {
+      unsigned long now = millis();
+      if (now - lastPress >= DEBOUNCE_MS) { //debounce check
+        status = !status;
+        lastPress = now;
+      }
+      touch_last_x = 0;
+      touch_last_y = 0;
+    }
+    if(edit) {
+      if(mode) {  //editing higher bound
+        if(touch_last_x >= 410 && touch_last_x <= 460 && touch_last_y >= 170 && touch_last_y <= 220) {
+          high = high + 1;
+          if(high >= 50) {
+            high = 50;
+          }
+          my_lcd.fillRect(410, 170, 50, 50, WHITE);
+          delay(100);
+
+        } else if (touch_last_x >= 410 && touch_last_x <= 460 && touch_last_y >= 230 && touch_last_y <= 280) {
+          high = high - 1;
+          if(high <= low) {
+            high = low+1;
+          }
+          my_lcd.fillRect(410, 230, 50, 50, WHITE);
+          delay(100);
+
+        }
+      } else if (!mode) { //editing lower bound
+        if(touch_last_x >= 410 && touch_last_x <= 460 && touch_last_y >= 170 && touch_last_y <= 220) {
+          low = low + 1;
+          if(low >= high) {
+            low = high-1;
+          }
+          my_lcd.fillRect(410, 170, 50, 50, WHITE);
+          delay(100);
+
+        } else if (touch_last_x >= 410 && touch_last_x <= 460 && touch_last_y >= 230 && touch_last_y <= 280) {
+          low = low - 1;
+          if(low <= 0) {
+            low = 0;
+          }
+          my_lcd.fillRect(410, 230, 50, 50, WHITE);
+          delay(100);
+
+        }
+      }
+      Serial.println(high);
+      Serial.println(low);
     }
   }
+
   drawGUI(0, 0, edit, mode);
   apneaAlarm();
+
   delay(50);
   //my_lcd.fillScreen(BLACK);
 
