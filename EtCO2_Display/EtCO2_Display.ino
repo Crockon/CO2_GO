@@ -86,6 +86,14 @@ float p = 0; //pressure
 const int customSDA = 27; 
 const int customSCL = 26; 
 
+//___________________________________
+//Settig up RH/Temp sensor
+#define SENSOR_ADDR 0x44
+float temperature = 25; //placeholder temp [C]
+float humidity = 50; //placeholder val
+
+
+
 // #define TFT_CS 25
 // #define TFT_RST 33
 // #define TFT_RS 32
@@ -808,6 +816,30 @@ void updateGraph(int co2val) {
   drawLimitLines();
 }
 
+void readTempRHSensor() {
+  I2C_2.requestFrom(SENSOR_ADDR, 6);
+  if (I2C_2.available() == 6) {
+    // Read temperature data
+    uint16_t temp_raw = (I2C_2.read() << 8) | I2C_2.read();
+    I2C_2.read();
+
+    // Read humidity data
+    uint16_t humi_raw = (I2C_2.read() << 8) | I2C_2.read();
+    I2C_2.read();
+
+    temperature = -45.0 + 175.0 * (temp_raw / 65535.0);
+    humidity = 100.0 * (humi_raw / 65535.0);
+
+
+    Serial.print("temperature: ");
+    Serial.print(temperature, 2);
+    Serial.print("°C \thumidity: ");
+    Serial.print(humidity, 2);
+    Serial.println(" %RH");
+  } else {
+    Serial.println("Data read failed！");
+  }
+}
 
 void setup()
 {
@@ -867,6 +899,7 @@ void setup()
 void loop() 
 {
   readSensor();
+  readTempRHSensor();
   //for battery monitor
 
   //fail safe for if connection is bad
