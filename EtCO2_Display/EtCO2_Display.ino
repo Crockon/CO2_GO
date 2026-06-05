@@ -44,10 +44,25 @@ Isolates EtCO2 and generates CO2 waveform.
 Displays waveform and EtCO2 value on TFT LCD display.
 Mute button functional as of now, edit button is not yet.
 
+FLOW SENSOR (SFM3400-33-D via Nicolay RS-232 cable + MAX3232):
+  - Wired to UART0 (RX0/TX0, GPIO3/GPIO1) on the PCB
+  - Serial Monitor IS NOT AVAILABLE because UART0 is used by the sensor
+  - All Serial.print() debug calls REMOVED for this reason
+  - Flow indicator on GUI:
+      GREEN  → flow > 40 mL/min (0.040 SLPM)
+      YELLOW → flow is a valid numerical reading but below threshold
+      RED    → cable communication error / no valid reading
+
+UPLOAD WORKFLOW (because UART0 is shared with the USB-Serial chip):
+  1. Disconnect the flow cable from RX0/TX0
+  2. Upload sketch from Arduino IDE
+  3. Reconnect the cable
+  4. Press RST on the ESP32
+
 TODO:
 - 'Edit' functionality
 - FICO2 calculation and baseline set
-- Integrate flow and Temp/RH sensor (once hardware integration working)
+- Integrate Temp/RH sensor (once hardware integration working)
 - High CO2 alarm, not sure how that will work
 - Add battery life display on GUI
 - Check accuracy with pressure comp vs without
@@ -117,11 +132,28 @@ float humidity = 50; //placeholder val
 #define WHITE   0xFFFF
 
 //__________________________________
-//NDIR CO2 sensor setup
+//NDIR CO2 sensor setup (on UART1 / GPIO16-17)
 #define SENSOR_RX_PIN 16   // ESP32 RX <- sensor TX
 #define SENSOR_TX_PIN  17  // ESP32 TX -> sensor RX
 
+//__________________________________
+// FLOW SENSOR setup (Nicolay RS-232 cable on UART0 / RX0=GPIO3, TX0=GPIO1)
+// Uses the default `Serial` object since UART0 is the default Serial.
+#define FLOW_SLAVE_ADDRESS     0x01
+#define FLOW_UART_BAUD         115200
+#define FLOW_CMD_GET_FLOW      0x10   // 32-bit signed, units mSLM
+#define FLOW_CMD_TEST          0x05   // Returns fixed 0x55 0xAA
+#define FLOW_RESPONSE_TIMEOUT_MS  100
+#define FLOW_DATA_BYTES        4
+// Display threshold — green if above this (in SLPM)
+// 40 mL/min = 0.040 SLPM
+#define FLOW_THRESHOLD_SLPM    0.040f
 
+// Public state — read elsewhere in the sketch
+float g_flowSLPM     = 0.0f;
+bool  g_flowValid    = false;
+uint8_t g_flowConsecutiveFailures = 0;
+#define FLOW_FAILURE_THRESHOLD 10
 
 //__________________________________
 // --- Graph configuration ---
@@ -262,6 +294,176 @@ const char *color_name[] = { "BLUE", "GREEN", "RED", "WHITE" ,"CYAN","MAGENTA","
 //   return (int)roundf(corrected);
 // }
 
+
+//__________________________________
+// FLOW SENSOR — CRC-8 lookup table (poly 0x31, init 0x00)
+static const uint8_t FLOW_CRC8_TABLE[256] = {
+  0x00,0x31,0x62,0x53,0xC4,0xF5,0xA6,0x97,0xB9,0x88,0xDB,0xEA,0x7D,0x4C,0x1F,0x2E,
+  0x43,0x72,0x21,0x10,0x87,0xB6,0xE5,0xD4,0xFA,0xCB,0x98,0xA9,0x3E,0x0F,0x5C,0x6D,
+  0x86,0xB7,0xE4,0xD5,0x42,0x73,0x20,0x11,0x3F,0x0E,0x5D,0x6C,0xFB,0xCA,0x99,0xA8,
+  0xC5,0xF4,0xA7,0x96,0x01,0x30,0x63,0x52,0x7C,0x4D,0x1E,0x2F,0xB8,0x89,0xDA,0xEB,
+  0x3D,0x0C,0x5F,0x6E,0xF9,0xC8,0x9B,0xAA,0x84,0xB5,0xE6,0xD7,0x40,0x71,0x22,0x13,
+  0x7E,0x4F,0x1C,0x2D,0xBA,0x8B,0xD8,0xE9,0xC7,0xF6,0xA5,0x94,0x03,0x32,0x61,0x50,
+  0xBB,0x8A,0xD9,0xE8,0x7F,0x4E,0x1D,0x2C,0x02,0x33,0x60,0x51,0xC6,0xF7,0xA4,0x95,
+  0xF8,0xC9,0x9A,0xAB,0x3C,0x0D,0x5E,0x6F,0x41,0x70,0x23,0x12,0x85,0xB4,0xE7,0xD6,
+  0x7A,0x4B,0x18,0x29,0xBE,0x8F,0xDC,0xED,0xC3,0xF2,0xA1,0x90,0x07,0x36,0x65,0x54,
+  0x39,0x08,0x5B,0x6A,0xFD,0xCC,0x9F,0xAE,0x80,0xB1,0xE2,0xD3,0x44,0x75,0x26,0x17,
+  0xFC,0xCD,0x9E,0xAF,0x38,0x09,0x5A,0x6B,0x45,0x74,0x27,0x16,0x81,0xB0,0xE3,0xD2,
+  0xBF,0x8E,0xDD,0xEC,0x7B,0x4A,0x19,0x28,0x06,0x37,0x64,0x55,0xC2,0xF3,0xA0,0x91,
+  0x47,0x76,0x25,0x14,0x83,0xB2,0xE1,0xD0,0xFE,0xCF,0x9C,0xAD,0x3A,0x0B,0x58,0x69,
+  0x04,0x35,0x66,0x57,0xC0,0xF1,0xA2,0x93,0xBD,0x8C,0xDF,0xEE,0x79,0x48,0x1B,0x2A,
+  0xC1,0xF0,0xA3,0x92,0x05,0x34,0x67,0x56,0x78,0x49,0x1A,0x2B,0xBC,0x8D,0xDE,0xEF,
+  0x82,0xB3,0xE0,0xD1,0x46,0x77,0x24,0x15,0x3B,0x0A,0x59,0x68,0xFF,0xCE,0x9D,0xAC
+};
+
+uint8_t flowComputeCRC8(const uint8_t *data, uint8_t len) {
+  uint8_t crc = 0x00;
+  for (uint8_t i = 0; i < len; i++) {
+    crc = FLOW_CRC8_TABLE[crc ^ data[i]];
+  }
+  return crc;
+}
+
+// Send command to flow sensor via UART0 (Serial)
+void flowSendCommand(uint8_t funcCode) {
+  uint8_t frame[4];
+  frame[0] = FLOW_SLAVE_ADDRESS;
+  frame[1] = funcCode;
+  frame[2] = 0x00;
+  frame[3] = flowComputeCRC8(frame, 3);
+  while (Serial.available()) Serial.read();
+  Serial.write(frame, 4);
+}
+
+// Receive a response from flow sensor on UART0 (Serial)
+bool flowReceiveResponse(uint8_t funcCode, uint8_t *buf, uint8_t expectedDataBytes) {
+  uint8_t totalBytes = 4 + expectedDataBytes;
+  uint8_t raw[16];
+  uint32_t start = millis();
+  uint8_t idx = 0;
+  while (idx < totalBytes) {
+    if (millis() - start > FLOW_RESPONSE_TIMEOUT_MS) return false;
+    if (Serial.available()) {
+      uint8_t b = (uint8_t)Serial.read();
+      if (idx == 0 && b != FLOW_SLAVE_ADDRESS) continue;
+      raw[idx++] = b;
+    }
+  }
+  if (raw[0] != FLOW_SLAVE_ADDRESS) return false;
+  if (raw[1] & 0x80)                return false;
+  if (raw[1] != funcCode)           return false;
+  if (raw[2] != expectedDataBytes)  return false;
+  uint8_t receivedCRC = raw[totalBytes - 1];
+  uint8_t computedCRC = flowComputeCRC8(raw, totalBytes - 1);
+  if (receivedCRC != computedCRC)   return false;
+  for (uint8_t i = 0; i < expectedDataBytes; i++) buf[i] = raw[3 + i];
+  return true;
+}
+
+// Read flow in SLPM. Updates g_flowSLPM and g_flowValid.
+void readFlowSensor() {
+  flowSendCommand(FLOW_CMD_GET_FLOW);
+  uint8_t buf[FLOW_DATA_BYTES];
+  if (!flowReceiveResponse(FLOW_CMD_GET_FLOW, buf, FLOW_DATA_BYTES)) {
+    g_flowValid = false;
+    g_flowSLPM = 0.0f;
+    g_flowConsecutiveFailures++;
+    return;
+  }
+  int32_t raw = (int32_t)(
+    (uint32_t)buf[0]        |
+    (uint32_t)buf[1] << 8   |
+    (uint32_t)buf[2] << 16  |
+    (uint32_t)buf[3] << 24
+  );
+  if (raw == 0x7FFFFFFF) {  // Sensor unreadable sentinel
+    g_flowValid = false;
+    g_flowSLPM = 0.0f;
+    g_flowConsecutiveFailures++;
+    return;
+  }
+  g_flowValid = true;
+  g_flowSLPM = (float)raw / 1000.0f;
+  g_flowConsecutiveFailures = 0;
+}
+
+// Spam test commands at startup to wake up the cable
+void flowSpamAndSettle(uint32_t spamDurationMs) {
+  uint8_t testCmd[4] = {0x01, 0x05, 0x00, 0x31};
+  uint32_t spamStart = millis();
+  while (millis() - spamStart < spamDurationMs) {
+    Serial.write(testCmd, 4);
+    delay(1);
+  }
+  while (Serial.available()) Serial.read();
+  delay(500);
+  while (Serial.available()) Serial.read();
+}
+
+// Recovery if cable becomes unresponsive
+void flowRecover() {
+  flowSpamAndSettle(2000);
+  g_flowConsecutiveFailures = 0;
+}
+
+// Moving average buffer for smoothing diaphragm pump pulsations.
+// ~50 samples × ~50ms loop = ~2.5 second window.
+#define FLOW_AVG_WINDOW 50
+float    g_flowHistory[FLOW_AVG_WINDOW] = {0};
+uint8_t  g_flowHistoryIdx = 0;
+bool     g_flowHistoryFilled = false;
+
+// Color updates only every 2 seconds so the display doesn't flicker
+uint16_t g_lastFlowColor = YELLOW;
+uint32_t g_lastFlowColorUpdate = 0;
+#define FLOW_COLOR_UPDATE_INTERVAL_MS 2000
+
+// Call this every loop to feed the moving average buffer.
+// Separate from color decision so we keep sampling at full rate
+// but only update the display color every 2 seconds.
+void updateFlowAverage() {
+  if (!g_flowValid) return;
+  g_flowHistory[g_flowHistoryIdx] = g_flowSLPM;
+  g_flowHistoryIdx = (g_flowHistoryIdx + 1) % FLOW_AVG_WINDOW;
+  if (g_flowHistoryIdx == 0) g_flowHistoryFilled = true;
+}
+
+// Decide flow indicator color (3-state) using moving average to smooth
+// out diaphragm pump pulsation. Only recomputes every 2 seconds so the
+// LED doesn't flicker.
+// Returns: GREEN if average flow > threshold,
+//          YELLOW if average flow is valid but below threshold,
+//          RED if reading is invalid / error state
+uint16_t getFlowIndicatorColor() {
+  if (!g_flowValid) {
+    g_lastFlowColor = MAGENTA;
+    return MAGENTA;
+  }
+
+  // Only recompute color every 2 seconds — display stays stable in between
+  if (millis() - g_lastFlowColorUpdate < FLOW_COLOR_UPDATE_INTERVAL_MS) {
+    return g_lastFlowColor;
+  }
+  g_lastFlowColorUpdate = millis();
+
+  // Compute average over the filled portion of the buffer
+  uint8_t count = g_flowHistoryFilled ? FLOW_AVG_WINDOW : g_flowHistoryIdx;
+  if (count == 0) {
+    g_lastFlowColor = YELLOW;
+    return YELLOW;
+  }
+
+  float sum = 0;
+  for (uint8_t i = 0; i < count; i++) sum += g_flowHistory[i];
+  float avg = sum / count;
+
+  if (avg > FLOW_THRESHOLD_SLPM) {
+    g_lastFlowColor = GREEN;
+  } else {
+    g_lastFlowColor = RED;
+  }
+  return g_lastFlowColor;
+}
 
 
 //For Battery monitor
@@ -457,15 +659,12 @@ void drawGUI(int drawBoxes, int redrawMute, bool editing, bool editmode, bool fl
 
   soc_past = soc;
 
-  if(flowFail) {
-    my_lcd.setTextColor(WHITE);
-    my_lcd.drawCircle(15, 10, 5, RED);
-    my_lcd.fillCircle(15, 10, 5, RED);
-  } else {
-    my_lcd.setTextColor(WHITE);
-    my_lcd.drawCircle(15, 10, 5, GREEN);
-    my_lcd.fillCircle(15, 10, 5, GREEN);
-  }
+  // ----- FLOW INDICATOR (3-state: GREEN / YELLOW / RED) -----
+  // Uses g_flowValid and g_flowSLPM directly instead of the flowFail flag
+  uint16_t flowColor = getFlowIndicatorColor();
+  my_lcd.setTextColor(WHITE);
+  my_lcd.drawCircle(15, 10, 5, flowColor);
+  my_lcd.fillCircle(15, 10, 5, flowColor);
   my_lcd.setTextSize(2);
   my_lcd.setFreeFont();
   my_lcd.drawString("Flow", 25, 5);
@@ -513,16 +712,13 @@ void drawGUI(int drawBoxes, int redrawMute, bool editing, bool editmode, bool fl
 void processLine(String line) {
   line.trim();
   if (line.length() == 0) return;
-  Serial.print("RAW: ");
-  Serial.println(line);
+  // NOTE: Serial.print() debug calls removed — UART0 is the flow sensor now
 
   if (line.startsWith(".")) {
     int spaceIdx = line.indexOf(' ');
     if (spaceIdx > 0) {
       scaleFactor = line.substring(spaceIdx + 1).toInt();
       if (scaleFactor <= 0) scaleFactor = 1;
-      Serial.print("Scale factor = ");
-      Serial.println(scaleFactor);
     }
     return;
   }
@@ -530,17 +726,11 @@ void processLine(String line) {
   int zFilteredIdx = line.indexOf("Z ");
   if (zFilteredIdx != -1) {
     filteredCO2 = line.substring(zFilteredIdx + 2).toInt() * scaleFactor; // ← write global
-    Serial.print("Filtered CO2 = ");
-    Serial.print(filteredCO2);
-    Serial.println(" ppm");
   }
 
   int zRawIdx = line.indexOf("z ");
   if (zRawIdx != -1) {
     rawCO2 = line.substring(zRawIdx + 2).toInt() * scaleFactor; // ← write global
-    Serial.print("Unfiltered CO2 = ");
-    Serial.print(rawCO2);
-    Serial.println(" ppm");
   }
 }
 
@@ -560,7 +750,15 @@ void readSensor() {
   soc        = readSOC();
   voltage    = readVoltage();
   chargeRate = readChargeRate();
-  
+
+  // ----- Read flow sensor -----
+  readFlowSensor();
+  updateFlowAverage();   // feed the rolling-average buffer for indicator smoothing
+
+  // Trigger recovery if too many consecutive flow failures
+  if (g_flowConsecutiveFailures >= FLOW_FAILURE_THRESHOLD) {
+    flowRecover();
+  }
 }
 
 void text_test(int co2Val)
@@ -584,7 +782,7 @@ FailResult checkFails() {
   result.battFail = (soc < battMin);
   result.tempFail = (temperature > tempMax);
   result.humFail  = (humidity > humMax);
-  //result.flowFail = (flow < flowMin);
+  result.flowFail = !g_flowValid;   // used by anything else that checks the flag
   return result;
 }
 
@@ -768,9 +966,6 @@ float pressureComp(float co2uncomp) {
     Y = ((2.811 * pow(10, -38)) * pow(co2uncomp, 6))-((9.817 * pow(10, -32)) * pow(co2uncomp, 5))-((1.304 * pow(10, -25)) * pow(co2uncomp, 4))-((8.126 * pow(10, -20)) * pow(co2uncomp, 3))-(2.311 * pow(10, -14) * pow(co2uncomp, 2))-(2.195 * pow(10, -9) * co2uncomp)-(1.471 * pow(10, -3));
     co2comp = co2uncomp/(1+(Y*(1013-pressureMbar)));
   }
-  Serial.println(co2uncomp);
-  Serial.println(co2comp);
-
   return co2comp;
 }
 
@@ -907,7 +1102,7 @@ void readTempRHSensor() {
   I2C_2.write(0x2C); // MSB Command
   I2C_2.write(0x06); // LSB Command
   if (I2C_2.endTransmission() != 0) {
-    Serial.println("Sensor didn't ACK the measurement command!");
+    // Sensor didn't ACK the measurement command
     return; 
   }
 
@@ -926,22 +1121,19 @@ void readTempRHSensor() {
 
     temperature = -45.0 + 175.0 * (temp_raw / 65535.0);
     humidity = 100.0 * (humi_raw / 65535.0);
-
-
-    Serial.print("temperature: ");
-    Serial.print(temperature, 2);
-    Serial.print("°C \thumidity: ");
-    Serial.print(humidity, 2);
-    Serial.println(" %RH");
-  } else {
-    Serial.println("Data read failed！");
   }
 }
 
 void setup()
 {
-  Serial.begin(115200);
-  // Initialize sensor serial — adjust baud rate to match your sensor's spec
+  // UART0 (Serial) is now dedicated to the flow sensor — NOT debug output.
+  // NDIR CO2 sensor uses UART1 (SensorSerial).
+  // Boot delay lets the ESP32 ROM finish dumping its boot chatter on TX0
+  // before we initialize Serial for the flow sensor.
+  delay(1000);
+  Serial.begin(FLOW_UART_BAUD);
+
+  // Initialize NDIR CO2 sensor on UART1
   SensorSerial.begin(9600, SERIAL_8N1, SENSOR_RX_PIN, SENSOR_TX_PIN);
 
   pinMode(ALARM_PIN, OUTPUT);
@@ -952,6 +1144,11 @@ void setup()
   uint16_t rotation,n;
   my_lcd.setRotation(3);
   touch_init(my_lcd.width(), my_lcd.height(),my_lcd.getRotation());
+
+  // Wake up the flow cable with spam-and-settle
+  // (must happen after Serial.begin and before the first real command)
+  delay(1500);  // Let cable boot
+  flowSpamAndSettle(3000);
 
   //initially draw GUI
   FailResult fails = checkFails();
@@ -972,16 +1169,11 @@ void setup()
   I2C_2.begin(21, 22); // SDA = pin 21, SCL = pin 22
   
 
-  //initialize battery display
+  // Battery monitor check — note: Serial.println() was removed because
+  // UART0 is now the flow sensor cable, not debug. If MAX17049 missing,
+  // we just continue without it rather than halting.
   uint16_t version = readRegister(REG_VERSION);
-  if (version == 0xFFFF) {
-    Serial.println("ERROR: MAX17049 not found on I2C bus!");
-    Serial.println("Check wiring and pull-up resistors on SDA/SCL.");
-    while (1) delay(1000); // halt
-  }
-  Serial.print("MAX17049 detected. IC version: 0x");
-  Serial.println(version, HEX);
-  Serial.println();
+  (void)version;
 
   //check connection with pressure sensor
   // if (! mpr.begin()) {
@@ -1000,10 +1192,7 @@ void loop()
   //for battery monitor
 
   //fail safe for if connection is bad
-  if (soc < 0 || voltage < 0) {
-    Serial.println("Read error — check I2C connection.");
-  } 
-
+  // (Serial.println() removed — UART0 is the flow sensor cable now)
 
   // Only read pressure every 5 seconds
   // if (millis() - lastPressureRead >= 5000UL) {
@@ -1113,8 +1302,6 @@ void loop()
 
         }
       }
-      Serial.println(high);
-      Serial.println(low);
     }
   }
 
