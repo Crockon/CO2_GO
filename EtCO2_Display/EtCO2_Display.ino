@@ -406,13 +406,63 @@ void flowRecover() {
   g_flowConsecutiveFailures = 0;
 }
 
-// Decide flow indicator color (3-state)
-// Returns: GREEN if flow > threshold, YELLOW if any valid numeric reading,
-// RED if reading is invalid / error state
+// Moving average buffer for smoothing diaphragm pump pulsations.
+// ~50 samples × ~50ms loop = ~2.5 second window.
+#define FLOW_AVG_WINDOW 50
+float    g_flowHistory[FLOW_AVG_WINDOW] = {0};
+uint8_t  g_flowHistoryIdx = 0;
+bool     g_flowHistoryFilled = false;
+
+// Color updates only every 2 seconds so the display doesn't flicker
+uint16_t g_lastFlowColor = YELLOW;
+uint32_t g_lastFlowColorUpdate = 0;
+#define FLOW_COLOR_UPDATE_INTERVAL_MS 2000
+
+// Call this every loop to feed the moving average buffer.
+// Separate from color decision so we keep sampling at full rate
+// but only update the display color every 2 seconds.
+void updateFlowAverage() {
+  if (!g_flowValid) return;
+  g_flowHistory[g_flowHistoryIdx] = g_flowSLPM;
+  g_flowHistoryIdx = (g_flowHistoryIdx + 1) % FLOW_AVG_WINDOW;
+  if (g_flowHistoryIdx == 0) g_flowHistoryFilled = true;
+}
+
+// Decide flow indicator color (3-state) using moving average to smooth
+// out diaphragm pump pulsation. Only recomputes every 2 seconds so the
+// LED doesn't flicker.
+// Returns: GREEN if average flow > threshold,
+//          YELLOW if average flow is valid but below threshold,
+//          RED if reading is invalid / error state
 uint16_t getFlowIndicatorColor() {
-  if (!g_flowValid) return RED;
-  if (g_flowSLPM > FLOW_THRESHOLD_SLPM) return GREEN;
-  return YELLOW;
+  if (!g_flowValid) {
+    g_lastFlowColor = RED;
+    return RED;
+  }
+
+  // Only recompute color every 2 seconds — display stays stable in between
+  if (millis() - g_lastFlowColorUpdate < FLOW_COLOR_UPDATE_INTERVAL_MS) {
+    return g_lastFlowColor;
+  }
+  g_lastFlowColorUpdate = millis();
+
+  // Compute average over the filled portion of the buffer
+  uint8_t count = g_flowHistoryFilled ? FLOW_AVG_WINDOW : g_flowHistoryIdx;
+  if (count == 0) {
+    g_lastFlowColor = YELLOW;
+    return YELLOW;
+  }
+
+  float sum = 0;
+  for (uint8_t i = 0; i < count; i++) sum += g_flowHistory[i];
+  float avg = sum / count;
+
+  if (avg > FLOW_THRESHOLD_SLPM) {
+    g_lastFlowColor = GREEN;
+  } else {
+    g_lastFlowColor = YELLOW;
+  }
+  return g_lastFlowColor;
 }
 
 
@@ -703,6 +753,7 @@ void readSensor() {
 
   // ----- Read flow sensor -----
   readFlowSensor();
+  updateFlowAverage();   // feed the rolling-average buffer for indicator smoothing
 
   // Trigger recovery if too many consecutive flow failures
   if (g_flowConsecutiveFailures >= FLOW_FAILURE_THRESHOLD) {
