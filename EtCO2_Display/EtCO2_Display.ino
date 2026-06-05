@@ -175,6 +175,13 @@ bool mode = 0;
 bool status = 0;
 bool prev_status = 0;
 
+struct FailResult {
+  bool flowFail;
+  bool tempFail;
+  bool humFail;
+  bool battFail;
+};
+
 float EtCO2 = 0;
 unsigned long counts_sec = 0;
 //__________________________________
@@ -298,7 +305,7 @@ float readChargeRate() {
   return signed_raw * 0.208; // %/hour
 }
 
-void drawGUI(int drawBoxes, int redrawMute, bool editing, bool editmode) {
+void drawGUI(int drawBoxes, int redrawMute, bool editing, bool editmode, bool flowFail, bool tempFail, bool humFail, bool battFail) {
   //if (alarmVisible) return;
 
   // Static variables to track previous state - only redraw on change
@@ -324,6 +331,7 @@ void drawGUI(int drawBoxes, int redrawMute, bool editing, bool editmode) {
     EtCO2 = 0;
     updateEtCO2(EtCO2);
     my_lcd.fillRect(13, 132, 165, 20, BLACK);
+    my_lcd.fillRect(270,5,80, 15, BLACK);
     
 
     if(status) {
@@ -444,7 +452,60 @@ void drawGUI(int drawBoxes, int redrawMute, bool editing, bool editmode) {
   my_lcd.drawRect(460, 6, 5, 10, WHITE);
 
   soc_past = soc;
-  
+
+  if(flowFail) {
+    my_lcd.setTextColor(WHITE);
+    my_lcd.drawCircle(15, 10, 5, RED);
+    my_lcd.fillCircle(15, 10, 5, RED);
+  } else {
+    my_lcd.setTextColor(WHITE);
+    my_lcd.drawCircle(15, 10, 5, GREEN);
+    my_lcd.fillCircle(15, 10, 5, GREEN);
+  }
+  my_lcd.setTextSize(2);
+  my_lcd.setFreeFont();
+  my_lcd.drawString("Flow", 25, 5);
+  my_lcd.setTextColor(WHITE);
+
+  if(tempFail) {
+    my_lcd.setTextColor(WHITE);
+    my_lcd.drawCircle(85, 10, 5, RED);
+    my_lcd.fillCircle(85, 10, 5, RED);
+  } else {
+    my_lcd.setTextColor(WHITE);
+    my_lcd.drawCircle(85, 10, 5, GREEN);
+    my_lcd.fillCircle(85, 10, 5, GREEN);
+  }
+  my_lcd.setTextSize(2);
+  my_lcd.setFreeFont();
+  my_lcd.drawString("Temp", 95, 5);
+  my_lcd.setTextColor(WHITE);
+
+  if(humFail) {
+    my_lcd.setTextColor(WHITE);
+    my_lcd.drawCircle(155, 10, 5, RED);
+    my_lcd.fillCircle(155, 10, 5, RED);
+  } else {
+    my_lcd.setTextColor(WHITE);
+    my_lcd.drawCircle(155, 10, 5, GREEN);
+    my_lcd.fillCircle(155, 10, 5, GREEN);
+  }
+  my_lcd.setTextSize(2);
+  my_lcd.setFreeFont();
+  my_lcd.drawString("Hum", 165, 5);
+  my_lcd.setTextColor(WHITE);
+
+  if(battFail && status) {
+    my_lcd.fillRect(270,5,80, 15, RED);
+    my_lcd.setTextColor(YELLOW);
+    my_lcd.setTextSize(2);
+    my_lcd.setFreeFont();
+    my_lcd.drawString("CHARGE", 275, 6);
+  } else if(battFail && status != prev_status) {
+    my_lcd.fillRect(270,5,80, 15, BLACK);
+  } else if(!battFail) {
+    my_lcd.fillRect(270,5,80, 15, BLACK);
+  }
 }
 
 void processLine(String line) {
@@ -511,6 +572,21 @@ void text_test(int co2Val)
 
 }
 
+FailResult checkFails() {
+  int battMin = 10;
+  int tempMax = 50;
+  int humMax = 80;
+  int flowMin = 1;
+  
+  FailResult result;
+  result.battFail = (soc < battMin);
+  result.tempFail = (temperature > tempMax);
+  result.humFail  = (humidity > humMax);
+  //result.flowFail = (flow < flowMin);
+  return result;
+}
+
+
 void updateEtCO2(float EtCO2) {
   my_lcd.fillRect(15, 55, 150, 80, BLACK);
   my_lcd.setTextColor(YELLOW);
@@ -569,11 +645,13 @@ void apneaAlarm() {
     //   drawGUI(1);
     // }
     return;
+  } else {
+    edit= 0;
   }
 
   if(apneaYes) {
 
-    if (millis() - alarmFlashT >= 200) { //flash "Apnea Detected" on screen
+    if (millis() - alarmFlashT >= 300) { //flash "Apnea Detected" on screen
       alarmFlashT  = millis();
       alarmVisible = !alarmVisible;
 
@@ -586,18 +664,20 @@ void apneaAlarm() {
         my_lcd.setTextSize(4);
         my_lcd.drawString("APNEA",    185, 125);
         my_lcd.drawString("DETECTED", 150, 175);
-        
+        my_lcd.setTextColor(WHITE);
+
         
       } else {
         digitalWrite(ALARM_PIN, LOW);
         my_lcd.fillRect(90, 85, 300, 150, BLACK);
-        drawGUI(1, 1, edit, mode);
+        FailResult fails = checkFails();
+        drawGUI(1, 1, edit, mode, fails.flowFail, fails.tempFail, fails.humFail, fails.battFail);
         updateEtCO2(EtCO2);
       }
     }
   } else 
     {
-      if (millis() - alarmFlashT >= 500) { //flash "Apnea Detected" on screen
+      if (millis() - alarmFlashT >= 800) { //flash "Apnea Detected" on screen
       alarmFlashT  = millis();
       alarmVisible = !alarmVisible;
 
@@ -610,12 +690,14 @@ void apneaAlarm() {
         my_lcd.setTextSize(4);
         my_lcd.drawString("LOW", 200, 125);
         my_lcd.drawString("CO2", 200, 175);
+        my_lcd.setTextColor(WHITE);
         
         
       } else {
         digitalWrite(ALARM_PIN, LOW);
         my_lcd.fillRect(90, 85, 300, 150, BLACK);
-        drawGUI(1, 1, edit, mode);
+        FailResult fails = checkFails();
+        drawGUI(1, 1, edit, mode, fails.flowFail, fails.tempFail, fails.humFail, fails.battFail);
         updateEtCO2(EtCO2);
       }
     
@@ -646,7 +728,8 @@ void alarmCount(float co2mmhg) {
     if (alarmState == ALARM_APNEA) {
       digitalWrite(ALARM_PIN, LOW);                        // make sure buzzer is off
       my_lcd.fillRect(90, 85, 300, 150, BLACK);     // erase the red box
-      drawGUI(1, 1, edit, mode);                                // redraw boxes/labels over it
+      FailResult fails = checkFails();
+      drawGUI(1, 1, edit, mode, fails.flowFail, fails.tempFail, fails.humFail, fails.battFail);                                // redraw boxes/labels over it
     }
     apneaTracking = false;
     apneaStartT = 0;
@@ -659,7 +742,8 @@ void alarmCount(float co2mmhg) {
     if (alarmState == ALARM_APNEA) {
       digitalWrite(ALARM_PIN, LOW);                        // make sure buzzer is off
       my_lcd.fillRect(90, 85, 300, 150, BLACK);     // erase the red box
-      drawGUI(1, 1, edit, mode);                                // redraw boxes/labels over it
+      FailResult fails = checkFails();
+      drawGUI(1, 1, edit, mode, fails.flowFail, fails.tempFail, fails.humFail, fails.battFail);                                // redraw boxes/labels over it
     }
     apneaTracking = false;
     apneaStartT = 0;
@@ -758,7 +842,7 @@ void updateGraph(int co2val) {
 
   // --- 3. Redraw text label (only this strip is erased, not the graph) ---
   if (!alarmVisible) {
-    my_lcd.fillRect(16, 165, 200, 50, BLACK);
+    my_lcd.fillRect(16, 165, 400, 50, BLACK);
     char text[30];
     char hightext[30];
     char lowtext[30];
@@ -857,8 +941,8 @@ void setup()
   touch_init(my_lcd.width(), my_lcd.height(),my_lcd.getRotation());
 
   //initially draw GUI
-  drawGUI(1, 1, edit, mode);
-  
+  FailResult fails = checkFails();
+  drawGUI(1, 1, edit, mode, fails.flowFail, fails.tempFail, fails.humFail, fails.battFail);  
   //my_lcd.drawString("CO2", 16, 105);
   // [END lopaka generated]
 
@@ -1021,7 +1105,8 @@ void loop()
     }
   }
 
-  drawGUI(0, 0, edit, mode);
+  FailResult fails = checkFails();
+  drawGUI(0, 0, edit, mode, fails.flowFail, fails.tempFail, fails.humFail, fails.battFail);
   apneaAlarm();
 
   delay(50);
