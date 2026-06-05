@@ -121,6 +121,8 @@ float humidity = 50; //placeholder val
 #define SENSOR_RX_PIN 16   // ESP32 RX <- sensor TX
 #define SENSOR_TX_PIN  17  // ESP32 TX -> sensor RX
 
+
+
 //__________________________________
 // --- Graph configuration ---
 #define CO2_MIN       0.0f    // mmhg floor (typical ambient)
@@ -259,6 +261,8 @@ const char *color_name[] = { "BLUE", "GREEN", "RED", "WHITE" ,"CYAN","MAGENTA","
 //   float corrected = c1 / denom;
 //   return (int)roundf(corrected);
 // }
+
+
 
 //For Battery monitor
 // Read a 16-bit register (MSB first, as per datasheet)
@@ -495,14 +499,12 @@ void drawGUI(int drawBoxes, int redrawMute, bool editing, bool editmode, bool fl
   my_lcd.drawString("Hum", 165, 5);
   my_lcd.setTextColor(WHITE);
 
-  if(battFail && status) {
+  if(battFail) {
     my_lcd.fillRect(270,5,80, 15, RED);
     my_lcd.setTextColor(YELLOW);
     my_lcd.setTextSize(2);
     my_lcd.setFreeFont();
     my_lcd.drawString("CHARGE", 275, 6);
-  } else if(battFail && status != prev_status) {
-    my_lcd.fillRect(270,5,80, 15, BLACK);
   } else if(!battFail) {
     my_lcd.fillRect(270,5,80, 15, BLACK);
   }
@@ -901,6 +903,17 @@ void updateGraph(int co2val) {
 }
 
 void readTempRHSensor() {
+  I2C_2.beginTransmission(SENSOR_ADDR);
+  I2C_2.write(0x2C); // MSB Command
+  I2C_2.write(0x06); // LSB Command
+  if (I2C_2.endTransmission() != 0) {
+    Serial.println("Sensor didn't ACK the measurement command!");
+    return; 
+  }
+
+  // 2. Give the sensor a brief moment to actually measure (e.g., 15-20ms)
+  delay(20);
+  
   I2C_2.requestFrom(SENSOR_ADDR, 6);
   if (I2C_2.available() == 6) {
     // Read temperature data
