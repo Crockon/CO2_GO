@@ -955,18 +955,39 @@ void alarmCount(float co2mmhg) {
 }
 
 float pressureComp(float co2uncomp) {
-  pressureMbar = mpr.readPressure();
+  // Only re-read pressure every 2 seconds
+  static float cachedPressure = 1013.0f;  // safe default
+  static unsigned long lastPressureTime = 0;
+  
+  if (millis() - lastPressureTime >= 2000UL) {
+    float rawP = mpr.readPressure();
+    if (rawP >= 600.0f && rawP <= 1100.0f) {
+      cachedPressure = rawP;
+    }
+    lastPressureTime = millis();
+  }
+
   float Y = 0;
-  float co2comp = 0;
-  if (co2uncomp < 1500) {
-    Y = ((2.6661 * pow(10, -16)) * pow(co2uncomp,4))-((1.1146 * pow(10, -12)) * pow(co2uncomp, 3))-((1.7397 * pow(10, -9)) * pow(co2uncomp, 2))-((1.2556 * pow(10, -6)) * co2uncomp)-(9.8754 * pow(10, -4));
-    co2comp = co2uncomp/(1+(Y*(1013-pressureMbar)));
+  if (co2uncomp < 1500.0f) {
+    Y = ( 2.6661e-16f * pow(co2uncomp, 4))
+      - ( 1.1146e-12f * pow(co2uncomp, 3))
+      + ( 1.7397e-9f  * pow(co2uncomp, 2))
+      - ( 1.2556e-6f  * co2uncomp)
+      - ( 9.8754e-4f);
+  } else {
+    Y = ( 2.811e-38f  * pow(co2uncomp, 6))
+      - ( 9.817e-32f  * pow(co2uncomp, 5))
+      + ( 1.304e-25f  * pow(co2uncomp, 4))
+      - ( 8.126e-20f  * pow(co2uncomp, 3))
+      + ( 2.311e-14f  * pow(co2uncomp, 2))
+      - ( 2.195e-9f   * co2uncomp)
+      - ( 1.471e-3f);
   }
-  else {
-    Y = ((2.811 * pow(10, -38)) * pow(co2uncomp, 6))-((9.817 * pow(10, -32)) * pow(co2uncomp, 5))-((1.304 * pow(10, -25)) * pow(co2uncomp, 4))-((8.126 * pow(10, -20)) * pow(co2uncomp, 3))-(2.311 * pow(10, -14) * pow(co2uncomp, 2))-(2.195 * pow(10, -9) * co2uncomp)-(1.471 * pow(10, -3));
-    co2comp = co2uncomp/(1+(Y*(1013-pressureMbar)));
-  }
-  return co2comp;
+
+  float denom = 1.0f + Y * (1013.0f - cachedPressure);
+  if (fabsf(denom) < 0.01f) return co2uncomp;
+
+  return co2uncomp / denom;
 }
 
 void drawLimitLines() {
@@ -1011,8 +1032,8 @@ void drawLimitLines() {
 // Push a new sample, redraw only the changed columns (fast, no full clear)
 void updateGraph(int co2val) {
   // --- 1. Store new sample in circular buffer ---
-  //co2val = pressureComp(co2val);
-  float co2mmhg = (float)co2val * PPM_TO_MMHG;
+  float co2comp = pressureComp((float)co2val);
+  float co2mmhg = co2comp * PPM_TO_MMHG;
   float newBarH = map(constrain(co2mmhg, CO2_MIN, CO2_MAX),
                     CO2_MIN, CO2_MAX, 10, 125);
   scrollBuf[scrollHead] = newBarH;
@@ -1130,7 +1151,7 @@ void setup()
   // NDIR CO2 sensor uses UART1 (SensorSerial).
   // Boot delay lets the ESP32 ROM finish dumping its boot chatter on TX0
   // before we initialize Serial for the flow sensor.
-  delay(1000);
+ 
   Serial.begin(FLOW_UART_BAUD);
 
   // Initialize NDIR CO2 sensor on UART1
@@ -1147,7 +1168,7 @@ void setup()
 
   // Wake up the flow cable with spam-and-settle
   // (must happen after Serial.begin and before the first real command)
-  delay(1500);  // Let cable boot
+  // Let cable boot
   flowSpamAndSettle(3000);
 
   //initially draw GUI
