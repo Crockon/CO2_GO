@@ -216,6 +216,10 @@ struct FailResult {
   bool battFail;
 };
 
+// Line Blocked warning
+bool g_lineBlockedWarning = false;
+bool g_lineBlockedDrawn   = false;
+
 float EtCO2 = 0;
 unsigned long counts_sec = 0;
 //__________________________________
@@ -423,7 +427,9 @@ uint32_t g_lastFlowColorUpdate = 0;
 // but only update the display color every 2 seconds.
 void updateFlowAverage() {
   if (!g_flowValid) return;
-  g_flowHistory[g_flowHistoryIdx] = g_flowSLPM;
+  float sample = fabsf(g_flowSLPM);
+  if (sample > 200.0f) return;
+  g_flowHistory[g_flowHistoryIdx] = sample;   // was g_flowSLPM — now uses rectified value
   g_flowHistoryIdx = (g_flowHistoryIdx + 1) % FLOW_AVG_WINDOW;
   if (g_flowHistoryIdx == 0) g_flowHistoryFilled = true;
 }
@@ -669,6 +675,15 @@ void drawGUI(int drawBoxes, int redrawMute, bool editing, bool editmode, bool fl
   my_lcd.setFreeFont();
   my_lcd.drawString("Flow", 25, 5);
   my_lcd.setTextColor(WHITE);
+
+  // if(flowColor == RED) {
+  //   my_lcd.fillRect(90, 85, 300, 150, RED);   // dark orange background
+  //   my_lcd.setTextColor(YELLOW);
+  //   my_lcd.setTextSize(4);
+  //   my_lcd.setFreeFont();
+  //   my_lcd.drawString("LINE",    205, 125);
+  //   my_lcd.drawString("BLOCKED", 155, 175);
+  // }
 
   if(tempFail) {
     my_lcd.setTextColor(WHITE);
@@ -990,7 +1005,7 @@ float pressureComp(float co2uncomp) {
   return co2uncomp / denom;
 }
 
-void drawLimitLines() {
+void drawLimitLines(bool alarm) {
   
   // Convert mmHg value to graph Y pixel position
   auto mmhgToY = [](float mmhg) -> int {
@@ -1013,7 +1028,7 @@ void drawLimitLines() {
   }
 
   // Draw dotted lines (every other 4px segment)
-  if(!alarmVisible) {
+  if(!alarm) {
     for (int x = GRAPH_X; x < GRAPH_X + graphWidth; x += 8) {
       if(edit && mode) {
         my_lcd.drawFastHLine(x, high_y, 4, RED);
@@ -1026,6 +1041,51 @@ void drawLimitLines() {
         my_lcd.drawFastHLine(x, low_y,  4, WHITE);
       }
     }
+  } else {
+
+    for (int x = GRAPH_X; x < GRAPH_X + graphWidth; x += 8) {
+      bool overlayActive = alarmVisible || g_lineBlockedDrawn;
+      bool inOverlayX    = (x >= 90 && x <= 389);
+
+      if (edit && mode) {
+        if (!(overlayActive && inOverlayX && high_y >= 85 && high_y <= 234))
+          my_lcd.drawFastHLine(x, high_y, 4, RED);
+      } else {
+        if (!(overlayActive && inOverlayX && high_y >= 85 && high_y <= 234))
+          my_lcd.drawFastHLine(x, high_y, 4, WHITE);
+      }
+
+      if (edit && !mode) {
+        if (!(overlayActive && inOverlayX && low_y >= 85 && low_y <= 234))
+          my_lcd.drawFastHLine(x, low_y, 4, RED);
+      } else {
+        if (!(overlayActive && inOverlayX && low_y >= 85 && low_y <= 234))
+          my_lcd.drawFastHLine(x, low_y, 4, WHITE);
+      }
+    }
+  }
+}
+
+void lineBlockedWarning() {
+  // Only show when flow color is RED and no apnea alarm is active
+  bool shouldShow = (getFlowIndicatorColor() == RED) && (alarmState == ALARM_OFF);
+
+  if (shouldShow) {
+    my_lcd.fillRect(90, 85, 300, 150, RED);
+    my_lcd.setTextColor(YELLOW);
+    my_lcd.setTextSize(4);
+    my_lcd.setFreeFont();
+    my_lcd.drawString("LINE", 195, 125);
+    my_lcd.drawString("BLOCKED", 155, 175);
+    g_lineBlockedDrawn = true;
+
+  } else if (!shouldShow && g_lineBlockedDrawn) {
+    // Flow recovered or apnea took over — erase the box
+    my_lcd.fillRect(90, 85, 300, 150, BLACK);
+    FailResult fails = checkFails();
+    drawGUI(1, 1, edit, mode, fails.flowFail, fails.tempFail, fails.humFail, fails.battFail);
+    updateEtCO2(EtCO2);
+    g_lineBlockedDrawn = false;
   }
 }
 
@@ -1040,48 +1100,57 @@ void updateGraph(int co2val) {
   scrollHead = (scrollHead + 1) % graphWidth;
 
   // --- 2. Redraw every column from the buffer ---
+  // --- 2. Redraw every column from the buffer ---
   for (int col = 0; col < graphWidth; col++) {
-    int bufIdx   = (scrollHead + col) % graphWidth;
-    int barH     = scrollBuf[bufIdx];
-    int x        = GRAPH_X + col;
-    int fillTop  = GRAPH_Y + (graphHeight - barH);
+    int bufIdx  = (scrollHead + col) % graphWidth;
+    int barH    = scrollBuf[bufIdx];
+    int x       = GRAPH_X + col;
+    int fillTop = GRAPH_Y + (graphHeight - barH);
 
-    // Sky (empty) portion — above the fill
-    if (fillTop > GRAPH_Y) {
-      if (!alarmVisible) {
-        my_lcd.drawFastVLine(x, GRAPH_Y, fillTop - GRAPH_Y+15, BLACK);
-      }
+    // Only protect columns that are horizontally under the overlay box (x=90 to x=390)
+    bool underOverlay = (alarmVisible || g_lineBlockedDrawn) && (x >= 90 && x <= 390);
+
+    int drawTop = underOverlay ? max(fillTop, 235) : fillTop;
+    int skyTop  = underOverlay ? max(GRAPH_Y,  235) : GRAPH_Y;
+    int skyBot  = drawTop;
+
+    if (skyBot > skyTop) {
+      my_lcd.drawFastVLine(x, skyTop, skyBot - skyTop + 15, BLACK);
     }
 
-    if (barH > 0) {
-      my_lcd.drawFastVLine(x, fillTop, barH, YELLOW);
+    int drawBot = GRAPH_Y + graphHeight;
+    if (drawTop < drawBot && barH > 0) {
+      my_lcd.drawFastVLine(x, drawTop, drawBot - drawTop, YELLOW);
     }
   }
 
   // --- 3. Redraw text label (only this strip is erased, not the graph) ---
   if (!alarmVisible) {
-    my_lcd.fillRect(16, 165, 400, 50, BLACK);
     char text[30];
     char hightext[30];
     char lowtext[30];
     my_lcd.setTextSize(2);
-    sprintf(text, "CO2: %.0f mmHg", co2mmhg);
-    sprintf(hightext, "H: %d mmHg", high);
-    sprintf(lowtext, "L: %d mmHg", low);
-    //my_lcd.drawString(text, 16, 165);
-    if(edit && mode) {
-      my_lcd.setTextColor(RED);
-    } else{
-      my_lcd.setTextColor(WHITE);
-    }
-    my_lcd.drawString(hightext, 16, 165);
 
-    if(edit && !mode) {
-      my_lcd.setTextColor(RED);
-    } else {
-      my_lcd.setTextColor(WHITE);
+    if(!g_lineBlockedDrawn) {
+      my_lcd.fillRect(16, 165, 400, 20, BLACK);
+      sprintf(text, "CO2: %.0f mmHg", co2mmhg);
+      sprintf(hightext, "H: %d mmHg", high);
+      sprintf(lowtext, "L: %d mmHg", low);
+      if(edit && mode) {
+        my_lcd.setTextColor(RED);
+      } else{
+        my_lcd.setTextColor(WHITE);
+      }
+      my_lcd.drawString(hightext, 16, 165);
+
+      if(edit && !mode) {
+        my_lcd.setTextColor(RED);
+      } else {
+        my_lcd.setTextColor(WHITE);
+      }
+      my_lcd.drawString(lowtext, 156, 165);
     }
-    my_lcd.drawString(lowtext, 156, 165);
+    //my_lcd.drawString(text, 16, 165);
 
     if(EtCO2 < low) {
       my_lcd.setTextColor(YELLOW);
@@ -1096,7 +1165,9 @@ void updateGraph(int co2val) {
         my_lcd.drawString("HIGH CO2 LVL", 16, 135);
       }
     } else {
-      my_lcd.fillRect(13, 132, 165, 20, BLACK);
+      if(!g_lineBlockedDrawn && !alarmVisible) {
+        my_lcd.fillRect(13, 132, 165, 20, BLACK);
+      }
 
     }
     my_lcd.setTextColor(WHITE);
@@ -1114,8 +1185,12 @@ void updateGraph(int co2val) {
 
   alarmCount(co2mmhg);
 
-  
-  drawLimitLines();
+  if(!g_lineBlockedDrawn && !alarmVisible) {
+    drawLimitLines(0);
+  } else {
+    drawLimitLines(1);
+  }
+
 }
 
 void readTempRHSensor() {
@@ -1329,6 +1404,9 @@ void loop()
   FailResult fails = checkFails();
   drawGUI(0, 0, edit, mode, fails.flowFail, fails.tempFail, fails.humFail, fails.battFail);
   apneaAlarm();
+  if(status) {
+    lineBlockedWarning();
+  }
 
   delay(50);
   //my_lcd.fillScreen(BLACK);
